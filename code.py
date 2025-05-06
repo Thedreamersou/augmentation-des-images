@@ -3,8 +3,8 @@ import numpy as np
 import os
 
 # Path to the folder containing the images
-input_folder = r"C:\Users\souha\OneDrive\Bureau\datah\images_resized"
-output_folder = r"C:\Users\souha\OneDrive\Bureau\datah\images_processed"
+input_folder = r"C:\Users\....\images_resized"
+output_folder = r"C:\Users\....\images_processed"
 
 # Ensure the output folder exists
 if not os.path.exists(output_folder):
