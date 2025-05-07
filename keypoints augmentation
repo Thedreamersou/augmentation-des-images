@@ -1,0 +1,325 @@
+import cv2
+import albumentations as A
+import numpy as np
+import os
+from glob import glob
+from tqdm import tqdm
+
+# Define paths
+image_dir = r"C:\..\images"
+label_dir = r"C:\...\labels"
+output_image_dir = r"C:\..\augmented_images"
+output_label_dir = r"C:\..\augmented_labels"
+
+os.makedirs(output_image_dir, exist_ok=True)
+os.makedirs(output_label_dir, exist_ok=True)
+
+# Configuration parameters
+aug_config = {
+    'rotate_limit': 15,
+    'brightness_limit': 0.2,
+    'contrast_limit': 0.2,
+    'shift_limit': 0.05,
+    'scale_limit': 0.1,
+    'num_aug_per_pipeline': 15
+}
+
+# Fixed augmentations
+transforms = {
+    'hflip': A.Compose(
+        [A.HorizontalFlip(p=1.0)],
+        bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']),
+        keypoint_params=A.KeypointParams(format='xy', label_fields=['keypoint_visibilities'], remove_invisible=False)
+    ),
+    'vflip': A.Compose(
+        [A.VerticalFlip(p=1.0)],
+        bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']),
+        keypoint_params=A.KeypointParams(format='xy', label_fields=['keypoint_visibilities'], remove_invisible=False)
+    ),
+    'rotate': A.Compose(
+        [A.SafeRotate(limit=aug_config['rotate_limit'], p=1.0, border_mode=cv2.BORDER_CONSTANT)],
+        bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']),
+        keypoint_params=A.KeypointParams(format='xy', label_fields=['keypoint_visibilities'], remove_invisible=False)
+    ),
+    'brightness': A.Compose(
+        [A.ColorJitter(brightness=aug_config['brightness_limit'], contrast=0.0, saturation=0.0, hue=0.0, p=1.0)],
+        bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']),
+        keypoint_params=A.KeypointParams(format='xy', label_fields=['keypoint_visibilities'], remove_invisible=False)
+    ),
+    'contrast': A.Compose(
+        [A.RandomBrightnessContrast(brightness_limit=aug_config['brightness_limit'], contrast_limit=aug_config['contrast_limit'], p=1.0)],
+        bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']),
+        keypoint_params=A.KeypointParams(format='xy', label_fields=['keypoint_visibilities'], remove_invisible=False)
+    )
+}
+
+# Random augmentation pipelines
+random_transforms = {
+    'random_combo_1': A.Compose([
+        A.OneOf([
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.5)
+        ], p=0.5),
+        A.ShiftScaleRotate(shift_limit=aug_config['shift_limit'], scale_limit=aug_config['scale_limit'], 
+                           rotate_limit=aug_config['rotate_limit'], p=0.8, border_mode=cv2.BORDER_CONSTANT),
+        A.RandomBrightnessContrast(brightness_limit=aug_config['brightness_limit'], 
+                                   contrast_limit=aug_config['contrast_limit'], p=0.8),
+        A.GaussNoise(p=0.5)
+    ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']),
+       keypoint_params=A.KeypointParams(format='xy', label_fields=['keypoint_visibilities'], remove_invisible=False)),
+    
+    'random_combo_2': A.Compose([
+        A.Perspective(scale=(0.02, 0.05), p=0.5),
+        A.RandomBrightnessContrast(brightness_limit=0.05, contrast_limit=0.05, p=0.5),
+        A.RGBShift(r_shift_limit=5, g_shift_limit=5, b_shift_limit=5, p=0.5)
+    ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']),
+       keypoint_params=A.KeypointParams(format='xy', label_fields=['keypoint_visibilities'], remove_invisible=False)),
+    
+    'random_combo_3': A.Compose([
+        A.ElasticTransform(alpha=0.5, sigma=20, p=0.5),
+        A.GaussNoise(p=0.5),
+        A.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1, p=0.5)
+    ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']),
+       keypoint_params=A.KeypointParams(format='xy', label_fields=['keypoint_visibilities'], remove_invisible=False)),
+    
+    'random_combo_4': A.Compose([
+        A.Blur(blur_limit=3, p=0.5),
+        A.Perspective(scale=(0.02, 0.05), p=0.5),
+        A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.1, p=0.5)
+    ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']),
+       keypoint_params=A.KeypointParams(format='xy', label_fields=['keypoint_visibilities'], remove_invisible=False))
+}
+
+def process_labels(label_path, img_width, img_height):
+    with open(label_path, 'r') as f:
+        lines = f.readlines()
+    
+    bboxes = []
+    keypoints = []
+    class_labels = []
+    visibilities = []
+    keypoints_counts = []
+    
+    for line in lines:
+        parts = list(map(float, line.strip().split()))
+        class_id = int(parts[0])
+        bbox = parts[1:5]
+        kps = parts[5:]
+        
+        # Convert bbox from YOLO to Pascal VOC
+        x_center, y_center, bw, bh = bbox
+        x_center_abs = x_center * img_width
+        y_center_abs = y_center * img_height
+        bw_abs = bw * img_width
+        bh_abs = bh * img_height
+        x_min = x_center_abs - bw_abs / 2
+        y_min = y_center_abs - bh_abs / 2
+        x_max = x_center_abs + bw_abs / 2
+        y_max = y_center_abs + bh_abs / 2
+        bboxes.append([x_min, y_min, x_max, y_max])
+        
+        # Process keypoints
+        obj_keypoints = []
+        obj_visibilities = []
+        for i in range(0, len(kps), 3):
+            x_norm, y_norm, vis = kps[i], kps[i+1], int(kps[i+2])
+            if vis not in [0, 1, 2]:
+                vis = 0
+            x_abs = x_norm * img_width
+            y_abs = y_norm * img_height
+            obj_keypoints.append((x_abs, y_abs))
+            obj_visibilities.append(vis)
+        
+        keypoints.extend(obj_keypoints)
+        visibilities.extend(obj_visibilities)
+        class_labels.append(class_id)
+        keypoints_counts.append(len(obj_keypoints))
+    
+    return bboxes, keypoints, class_labels, visibilities, keypoints_counts
+
+def clamp_coordinates(bboxes, keypoints, w, h):
+    clamped_bboxes = []
+    for bbox in bboxes:
+        x_min, y_min, x_max, y_max = bbox
+        x_min = max(0 - 1e-5, min(x_min, w + 1e-5))
+        y_min = max(0 - 1e-5, min(y_min, h + 1e-5))
+        x_max = max(0 - 1e-5, min(x_max, w + 1e-5))
+        y_max = max(0 - 1e-5, min(y_max, h + 1e-5))
+        clamped_bboxes.append([x_min, y_min, x_max, y_max])
+    
+    clamped_keypoints = []
+    for kp in keypoints:
+        x, y = kp
+        x = max(0 - 1e-5, min(x, w + 1e-5))
+        y = max(0 - 1e-5, min(y, h + 1e-5))
+        clamped_keypoints.append((x, y))
+    
+    return clamped_bboxes, clamped_keypoints
+
+def save_augmented(image, labels, base_name, transform_name, output_image_dir, output_label_dir):
+    img_name = f"{os.path.splitext(base_name)[0]}_{transform_name}.jpg"
+    img_path = os.path.join(output_image_dir, img_name)
+    if os.path.exists(img_path):
+        print(f"File {img_name} already exists, skipping...")
+        return
+    
+    cv2.imwrite(img_path, cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+    lbl_name = f"{os.path.splitext(base_name)[0]}_{transform_name}.txt"
+    with open(os.path.join(output_label_dir, lbl_name), 'w') as f:
+        f.write('\n'.join(labels))
+
+def apply_transformations(image, base_name, w, h, bboxes, keypoints, class_labels, visibilities, kp_counts):
+    augmented_count = 0
+    
+    # Fixed transforms
+    for transform_name, transform in transforms.items():
+        try:
+            transformed = transform(
+                image=image,
+                bboxes=bboxes,
+                class_labels=class_labels,
+                keypoints=keypoints,
+                keypoint_visibilities=visibilities
+            )
+        except Exception as e:
+            print(f"Error applying {transform_name} to {base_name}: {str(e)}")
+            continue
+        
+        transformed_bboxes, transformed_keypoints = clamp_coordinates(
+            transformed.get('bboxes', bboxes), 
+            transformed.get('keypoints', keypoints), 
+            w, h
+        )
+        
+        new_lines = []
+        kp_index = 0
+        for i, class_id in enumerate(transformed.get('class_labels', class_labels)):
+            x_min, y_min, x_max, y_max = transformed_bboxes[i]
+            x_center = (x_min + x_max) / 2
+            y_center = (y_min + y_max) / 2
+            bw_box = x_max - x_min
+            bh_box = y_max - y_min
+            
+            yolo_bbox = [
+                x_center / w,
+                y_center / h,
+                bw_box / w,
+                bh_box / h
+            ]
+            
+            num_kps = kp_counts[i]
+            obj_keypoints = []
+            for j in range(num_kps):
+                if kp_index >= len(transformed_keypoints):
+                    break
+                x, y = transformed_keypoints[kp_index]
+                vis = transformed.get('keypoint_visibilities', visibilities)[kp_index]
+                obj_keypoints.extend([
+                    x / w,
+                    y / h,
+                    vis
+                ])
+                kp_index += 1
+            
+            new_line = [str(class_id)] + [f"{val:.6f}" for val in yolo_bbox] + \
+                       [f"{val:.6f}" if idx % 3 != 2 else str(int(val))
+                        for idx, val in enumerate(obj_keypoints)]
+            new_lines.append(' '.join(new_line))
+        
+        save_augmented(transformed['image'], new_lines, base_name, transform_name, output_image_dir, output_label_dir)
+        augmented_count += 1
+
+    # Random transforms
+    for rt_name, rt_transform in random_transforms.items():
+        for i in range(aug_config['num_aug_per_pipeline']):
+            transform_id = f"{rt_name}_{i+1}"
+            try:
+                transformed = rt_transform(
+                    image=image,
+                    bboxes=bboxes,
+                    class_labels=class_labels,
+                    keypoints=keypoints,
+                    keypoint_visibilities=visibilities
+                )
+            except Exception as e:
+                print(f"Error applying {transform_id} to {base_name}: {str(e)}")
+                continue
+            
+            transformed_bboxes, transformed_keypoints = clamp_coordinates(
+                transformed.get('bboxes', bboxes), 
+                transformed.get('keypoints', keypoints), 
+                w, h
+            )
+            
+            new_lines = []
+            kp_index = 0
+            for j, class_id in enumerate(transformed.get('class_labels', class_labels)):
+                x_min, y_min, x_max, y_max = transformed_bboxes[j]
+                x_center = (x_min + x_max) / 2
+                y_center = (y_min + y_max) / 2
+                bw_box = x_max - x_min
+                bh_box = y_max - y_min
+                
+                yolo_bbox = [
+                    x_center / w,
+                    y_center / h,
+                    bw_box / w,
+                    bh_box / h
+                ]
+                
+                num_kps = kp_counts[j]
+                obj_keypoints = []
+                for k in range(num_kps):
+                    if kp_index >= len(transformed_keypoints):
+                        break
+                    x, y = transformed_keypoints[kp_index]
+                    vis = transformed.get('keypoint_visibilities', visibilities)[kp_index]
+                    obj_keypoints.extend([
+                        x / w,
+                        y / h,
+                        vis
+                    ])
+                    kp_index += 1
+                
+                new_line = [str(class_id)] + [f"{val:.6f}" for val in yolo_bbox] + \
+                           [f"{val:.6f}" if idx % 3 != 2 else str(int(val))
+                                for idx, val in enumerate(obj_keypoints)]
+                new_lines.append(' '.join(new_line))
+            
+            save_augmented(transformed['image'], new_lines, base_name, transform_id, output_image_dir, output_label_dir)
+            augmented_count += 1
+
+    return augmented_count
+
+# Main processing loop
+image_files = glob(os.path.join(image_dir, '*.jpg')) + glob(os.path.join(image_dir, '*.webp'))
+total_augmented = 0
+
+for image_path in tqdm(image_files, desc="Processing images"):
+    image = cv2.imread(image_path)
+    if image is None:
+        print(f"Failed to load image: {image_path}")
+        continue
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    h, w = image.shape[:2]
+    
+    base_name = os.path.basename(image_path)
+    label_path = os.path.join(label_dir, os.path.splitext(base_name)[0] + '.txt')
+    if not os.path.exists(label_path):
+        print(f"Label file not found for {image_path}")
+        continue
+    
+    try:
+        bboxes, keypoints, class_labels, visibilities, kp_counts = process_labels(label_path, w, h)
+    except Exception as e:
+        print(f"Error processing labels for {image_path}: {str(e)}")
+        continue
+    
+    try:
+        augmented = apply_transformations(image, base_name, w, h, bboxes, keypoints, class_labels, visibilities, kp_counts)
+        total_augmented += augmented
+    except Exception as e:
+        print(f"Error applying transformations to {image_path}: {str(e)}")
+        continue
+
+print(f"Augmentation complete! Total augmented images: {total_augmented}")
